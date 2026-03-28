@@ -74,10 +74,9 @@ $(BUILD_DIR)/classes.dex: $(CLASSES_DIR)/com/example/helloworld/MainActivity.cla
 	java -cp $(DX_JAR) com.android.dx.command.Main --dex --output=$@ $(CLASSES_DIR)
 
 # Encode AndroidManifest.xml to binary format
-$(BUILD_DIR)/AndroidManifest.xml: $(TOOLS_CLASSES_DIR)/com/example/build/ApkBuilder.class
+$(BUILD_DIR)/AndroidManifest.xml: $(MANIFEST) $(TOOLS_CLASSES_DIR)/com/example/build/ApkBuilder.class
 	java -cp $(TOOLS_CLASSES_DIR) com.example.build.BinaryXmlEncoder \
-		"$(PACKAGE)" "$(APP_LABEL)" "$(ACTIVITY)" $@ \
-		$(MIN_SDK) $(TARGET_SDK) $(VERSION_CODE) $(VERSION_NAME)
+		$(MANIFEST) $@ $(MIN_SDK) $(TARGET_SDK) $(VERSION_CODE) $(VERSION_NAME)
 
 # Package unsigned APK
 $(BUILD_DIR)/app-unsigned.apk: $(BUILD_DIR)/AndroidManifest.xml $(BUILD_DIR)/classes.dex $(TOOLS_CLASSES_DIR)/com/example/build/ApkBuilder.class

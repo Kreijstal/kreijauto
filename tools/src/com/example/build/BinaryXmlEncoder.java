@@ -2,20 +2,16 @@ package com.example.build;
 
 import java.io.*;
 import java.util.*;
+import javax.xml.parsers.*;
+import org.xml.sax.*;
+import org.xml.sax.helpers.DefaultHandler;
 
 /**
- * Minimal Android binary XML encoder.
- * Encodes a simple AndroidManifest.xml into the binary format Android expects.
- * Only supports what's needed for a basic Hello World app.
+ * Converts plain AndroidManifest.xml to Android binary XML format.
+ * Parses arbitrary XML input — not hardcoded to a specific manifest structure.
  *
- * Resource IDs from android.R$attr (API 28):
- *   name             = 0x01010003
- *   label            = 0x01010001
- *   exported         = 0x01010010
- *   minSdkVersion    = 0x0101020c
- *   targetSdkVersion = 0x01010270
- *   versionCode      = 0x0101021b
- *   versionName      = 0x0101021c
+ * Attribute resource IDs are looked up from a built-in table of common
+ * android:* attributes (extracted from android.R$attr).
  */
 public class BinaryXmlEncoder {
 
@@ -29,9 +25,50 @@ public class BinaryXmlEncoder {
 
     private static final String ANDROID_NS = "http://schemas.android.com/apk/res/android";
 
+    // Common android:* attribute name -> resource ID mapping
+    // Extracted from android.R$attr (API 28)
+    private static final Map<String, Integer> ATTR_RESOURCE_IDS = new HashMap<>();
+    static {
+        ATTR_RESOURCE_IDS.put("theme", 0x01010000);
+        ATTR_RESOURCE_IDS.put("label", 0x01010001);
+        ATTR_RESOURCE_IDS.put("icon", 0x01010002);
+        ATTR_RESOURCE_IDS.put("name", 0x01010003);
+        ATTR_RESOURCE_IDS.put("permission", 0x01010006);
+        ATTR_RESOURCE_IDS.put("exported", 0x01010010);
+        ATTR_RESOURCE_IDS.put("enabled", 0x0101000e);
+        ATTR_RESOURCE_IDS.put("debuggable", 0x0101000f);
+        ATTR_RESOURCE_IDS.put("description", 0x01010020);
+        ATTR_RESOURCE_IDS.put("protectionLevel", 0x01010009);
+        ATTR_RESOURCE_IDS.put("configChanges", 0x0101001f);
+        ATTR_RESOURCE_IDS.put("screenOrientation", 0x0101001e);
+        ATTR_RESOURCE_IDS.put("launchMode", 0x0101001d);
+        ATTR_RESOURCE_IDS.put("value", 0x01010024);
+        ATTR_RESOURCE_IDS.put("resource", 0x01010025);
+        ATTR_RESOURCE_IDS.put("minSdkVersion", 0x0101020c);
+        ATTR_RESOURCE_IDS.put("maxSdkVersion", 0x01010271);
+        ATTR_RESOURCE_IDS.put("versionCode", 0x0101021b);
+        ATTR_RESOURCE_IDS.put("versionName", 0x0101021c);
+        ATTR_RESOURCE_IDS.put("targetSdkVersion", 0x01010270);
+        ATTR_RESOURCE_IDS.put("allowBackup", 0x01010280);
+        ATTR_RESOURCE_IDS.put("supportsRtl", 0x010103af);
+        ATTR_RESOURCE_IDS.put("roundIcon", 0x0101052c);
+        ATTR_RESOURCE_IDS.put("appComponentFactory", 0x0101057a);
+        ATTR_RESOURCE_IDS.put("compileSdkVersion", 0x01010572);
+        ATTR_RESOURCE_IDS.put("compileSdkVersionCodename", 0x01010573);
+    }
+
     private final List<String> stringPool = new ArrayList<>();
-    private final List<Integer> resourceIds = new ArrayList<>();
     private final ByteArrayOutputStream body = new ByteArrayOutputStream();
+
+    // Attribute names that need resource IDs, in order of their string pool index
+    private final List<String> mappedAttrNames = new ArrayList<>();
+    private final List<Integer> mappedAttrIds = new ArrayList<>();
+
+    // Extra parameters injected into <manifest> and as <uses-sdk>
+    private int minSdk = 21;
+    private int targetSdk = 28;
+    private int versionCode = 1;
+    private String versionName = "1.0";
 
     private int getOrAddString(String s) {
         int idx = stringPool.indexOf(s);
@@ -42,113 +79,83 @@ public class BinaryXmlEncoder {
         return idx;
     }
 
-    public byte[] encode(String packageName, String appLabel, String activityName,
-                         int minSdk, int targetSdk, int versionCode, String versionName) throws IOException {
-        // Resource-mapped attribute strings MUST come first in string pool.
-        // The resource map maps stringPool[i] -> resourceIds[i] for i < resourceIds.size()
-        // These must be sorted by resource ID for Android's binary search.
-        int idxLabel = getOrAddString("label");
-        resourceIds.add(0x01010001);
+    public byte[] encode(File xmlFile) throws Exception {
+        // First pass: collect all attribute names that need resource IDs
+        // and all strings, so we can build the string pool with mapped attrs first
+        Set<String> attrNamesUsed = new LinkedHashSet<>();
+        Set<String> allStrings = new LinkedHashSet<>();
 
-        int idxName = getOrAddString("name");
-        resourceIds.add(0x01010003);
+        SAXParserFactory factory = SAXParserFactory.newInstance();
+        factory.setNamespaceAware(true);
+        SAXParser parser = factory.newSAXParser();
 
-        int idxExported = getOrAddString("exported");
-        resourceIds.add(0x01010010);
-
-        int idxMinSdk = getOrAddString("minSdkVersion");
-        resourceIds.add(0x0101020c);
-
-        int idxVersionCode = getOrAddString("versionCode");
-        resourceIds.add(0x0101021b);
-
-        int idxVersionName = getOrAddString("versionName");
-        resourceIds.add(0x0101021c);
-
-        int idxTargetSdk = getOrAddString("targetSdkVersion");
-        resourceIds.add(0x01010270);
-
-        // Non-mapped strings
-        int idxAndroidNs = getOrAddString(ANDROID_NS);
-        int idxAndroid = getOrAddString("android");
-        int idxPackageStr = getOrAddString("package");
-        int idxManifest = getOrAddString("manifest");
-        int idxApplication = getOrAddString("application");
-        int idxActivity = getOrAddString("activity");
-        int idxIntentFilter = getOrAddString("intent-filter");
-        int idxAction = getOrAddString("action");
-        int idxCategory = getOrAddString("category");
-        int idxUsesSdk = getOrAddString("uses-sdk");
-        int idxPackageVal = getOrAddString(packageName);
-        int idxAppLabelVal = getOrAddString(appLabel);
-        int idxActivityVal = getOrAddString(activityName);
-        int idxMainAction = getOrAddString("android.intent.action.MAIN");
-        int idxLauncherCat = getOrAddString("android.intent.category.LAUNCHER");
-        int idxVersionNameVal = getOrAddString(versionName);
-
-        int line = 1;
-
-        // Start namespace
-        writeStartNamespace(line, idxAndroid, idxAndroidNs);
-
-        // <manifest package="..." android:versionCode="..." android:versionName="...">
-        writeStartElement(line, -1, idxManifest, new int[][]{
-            {-1, idxPackageStr, idxPackageVal, 0x03, -1},                    // package (no namespace)
-            {idxAndroidNs, idxVersionCode, -1, 0x10, versionCode},           // TYPE_INT_DEC
-            {idxAndroidNs, idxVersionName, idxVersionNameVal, 0x03, -1},     // TYPE_STRING
+        // Collect pass
+        parser.parse(xmlFile, new DefaultHandler() {
+            @Override
+            public void startElement(String uri, String localName, String qName, Attributes attributes) {
+                allStrings.add(localName);
+                for (int i = 0; i < attributes.getLength(); i++) {
+                    String attrUri = attributes.getURI(i);
+                    String attrLocal = attributes.getLocalName(i);
+                    String attrValue = attributes.getValue(i);
+                    if (ANDROID_NS.equals(attrUri) && ATTR_RESOURCE_IDS.containsKey(attrLocal)) {
+                        attrNamesUsed.add(attrLocal);
+                    }
+                    allStrings.add(attrLocal);
+                    allStrings.add(attrValue);
+                }
+            }
         });
 
-        // <uses-sdk android:minSdkVersion="..." android:targetSdkVersion="..."/>
-        line++;
-        writeStartElement(line, -1, idxUsesSdk, new int[][]{
-            {idxAndroidNs, idxMinSdk, -1, 0x10, minSdk},
-            {idxAndroidNs, idxTargetSdk, -1, 0x10, targetSdk},
-        });
-        writeEndElement(line, -1, idxUsesSdk);
+        // Also add injected attributes
+        attrNamesUsed.add("versionCode");
+        attrNamesUsed.add("versionName");
+        attrNamesUsed.add("minSdkVersion");
+        attrNamesUsed.add("targetSdkVersion");
 
-        // <application android:label="...">
-        line++;
-        writeStartElement(line, -1, idxApplication, new int[][]{
-            {idxAndroidNs, idxLabel, idxAppLabelVal, 0x03, -1},
-        });
+        // Build string pool: resource-mapped attribute names first, sorted by resource ID
+        List<Map.Entry<String, Integer>> sortedAttrs = new ArrayList<>();
+        for (String name : attrNamesUsed) {
+            Integer id = ATTR_RESOURCE_IDS.get(name);
+            if (id != null) {
+                sortedAttrs.add(new AbstractMap.SimpleEntry<>(name, id));
+            }
+        }
+        sortedAttrs.sort(Comparator.comparingInt(Map.Entry::getValue));
 
-        // <activity android:name="..." android:exported="true">
-        line++;
-        writeStartElement(line, -1, idxActivity, new int[][]{
-            {idxAndroidNs, idxName, idxActivityVal, 0x03, -1},
-            {idxAndroidNs, idxExported, -1, 0x12, 0xFFFFFFFF},  // TYPE_INT_BOOLEAN, true
-        });
+        for (Map.Entry<String, Integer> entry : sortedAttrs) {
+            int idx = getOrAddString(entry.getKey());
+            mappedAttrNames.add(entry.getKey());
+            mappedAttrIds.add(entry.getValue());
+        }
 
-        // <intent-filter>
-        line++;
-        writeStartElement(line, -1, idxIntentFilter, new int[][]{});
+        // Add remaining strings
+        getOrAddString(ANDROID_NS);
+        getOrAddString("android");
+        getOrAddString("package");
+        getOrAddString("uses-sdk");
+        for (String s : allStrings) {
+            getOrAddString(s);
+        }
+        getOrAddString(String.valueOf(versionCode));
+        getOrAddString(versionName);
 
-        // <action android:name="android.intent.action.MAIN"/>
-        line++;
-        writeStartElement(line, -1, idxAction, new int[][]{
-            {idxAndroidNs, idxName, idxMainAction, 0x03, -1},
-        });
-        writeEndElement(line, -1, idxAction);
+        int idxAndroidNs = stringPool.indexOf(ANDROID_NS);
+        int idxAndroid = stringPool.indexOf("android");
 
-        // <category android:name="android.intent.category.LAUNCHER"/>
-        line++;
-        writeStartElement(line, -1, idxCategory, new int[][]{
-            {idxAndroidNs, idxName, idxLauncherCat, 0x03, -1},
-        });
-        writeEndElement(line, -1, idxCategory);
+        // Write namespace start
+        writeStartNamespace(1, idxAndroid, idxAndroidNs);
 
-        writeEndElement(line, -1, idxIntentFilter);
-        writeEndElement(line, -1, idxActivity);
-        writeEndElement(line, -1, idxApplication);
-        writeEndElement(line, -1, idxManifest);
+        // Second pass: emit binary XML
+        parser.parse(xmlFile, new EmitHandler(idxAndroidNs));
 
-        writeEndNamespace(line, idxAndroid, idxAndroidNs);
+        // Write namespace end
+        writeEndNamespace(99, idxAndroid, idxAndroidNs);
 
-        // Assemble full document
+        // Assemble
         byte[] stringPoolBytes = encodeStringPool();
         byte[] resourceMapBytes = encodeResourceMap();
         byte[] bodyBytes = body.toByteArray();
-
         int totalSize = 8 + stringPoolBytes.length + resourceMapBytes.length + bodyBytes.length;
 
         ByteArrayOutputStream out = new ByteArrayOutputStream();
@@ -158,14 +165,129 @@ public class BinaryXmlEncoder {
         out.write(stringPoolBytes);
         out.write(resourceMapBytes);
         out.write(bodyBytes);
-
         return out.toByteArray();
+    }
+
+    private class EmitHandler extends DefaultHandler {
+        private int line = 1;
+        private final int idxAndroidNs;
+        private boolean injectedUsesSdk = false;
+
+        EmitHandler(int idxAndroidNs) {
+            this.idxAndroidNs = idxAndroidNs;
+        }
+
+        @Override
+        public void startElement(String uri, String localName, String qName, Attributes attributes) throws SAXException {
+            try {
+                int nsIdx = -1; // elements don't have namespaces
+                int nameIdx = getOrAddString(localName);
+
+                // Collect attributes
+                List<int[]> attrs = new ArrayList<>();
+                for (int i = 0; i < attributes.getLength(); i++) {
+                    String attrUri = attributes.getURI(i);
+                    String attrLocal = attributes.getLocalName(i);
+                    String attrValue = attributes.getValue(i);
+                    int attrNsIdx = ANDROID_NS.equals(attrUri) ? idxAndroidNs : -1;
+                    int attrNameIdx = getOrAddString(attrLocal);
+                    addAttr(attrs, attrNsIdx, attrNameIdx, attrValue);
+                }
+
+                // Inject versionCode/versionName on <manifest>
+                if ("manifest".equals(localName)) {
+                    addAttr(attrs, idxAndroidNs, getOrAddString("versionCode"),
+                            null, 0x10, versionCode);
+                    addAttr(attrs, idxAndroidNs, getOrAddString("versionName"),
+                            versionName);
+                }
+
+                writeStartElement(line, nsIdx, nameIdx, attrs);
+
+                // Inject <uses-sdk> right after <manifest>
+                if ("manifest".equals(localName) && !injectedUsesSdk) {
+                    injectedUsesSdk = true;
+                    line++;
+                    List<int[]> sdkAttrs = new ArrayList<>();
+                    addAttr(sdkAttrs, idxAndroidNs, getOrAddString("minSdkVersion"),
+                            null, 0x10, minSdk);
+                    addAttr(sdkAttrs, idxAndroidNs, getOrAddString("targetSdkVersion"),
+                            null, 0x10, targetSdk);
+                    int sdkNameIdx = getOrAddString("uses-sdk");
+                    writeStartElement(line, -1, sdkNameIdx, sdkAttrs);
+                    writeEndElement(line, -1, sdkNameIdx);
+                }
+
+                line++;
+            } catch (IOException e) {
+                throw new SAXException(e);
+            }
+        }
+
+        @Override
+        public void endElement(String uri, String localName, String qName) throws SAXException {
+            try {
+                writeEndElement(line, -1, getOrAddString(localName));
+            } catch (IOException e) {
+                throw new SAXException(e);
+            }
+        }
+
+        private void addAttr(List<int[]> attrs, int nsIdx, int nameIdx, String value) {
+            addAttr(attrs, nsIdx, nameIdx, value, -1, -1);
+        }
+
+        private void addAttr(List<int[]> attrs, int nsIdx, int nameIdx, String value,
+                             int forceType, int forceData) {
+            int rawValueIdx;
+            int dataType;
+            int data;
+
+            if (forceType >= 0) {
+                // Explicit type/data (integer, boolean, etc.)
+                rawValueIdx = -1;
+                dataType = forceType;
+                data = forceData;
+            } else if (value == null) {
+                rawValueIdx = -1;
+                dataType = 0x10; // TYPE_INT_DEC
+                data = 0;
+            } else if ("true".equals(value)) {
+                rawValueIdx = -1;
+                dataType = 0x12; // TYPE_INT_BOOLEAN
+                data = 0xFFFFFFFF;
+            } else if ("false".equals(value)) {
+                rawValueIdx = -1;
+                dataType = 0x12;
+                data = 0;
+            } else if (value.startsWith("0x")) {
+                try {
+                    rawValueIdx = -1;
+                    dataType = 0x10; // TYPE_INT_DEC
+                    data = Integer.parseUnsignedInt(value.substring(2), 16);
+                } catch (NumberFormatException e) {
+                    rawValueIdx = getOrAddString(value);
+                    dataType = 0x03; // TYPE_STRING
+                    data = rawValueIdx;
+                }
+            } else {
+                try {
+                    rawValueIdx = -1;
+                    dataType = 0x10; // TYPE_INT_DEC
+                    data = Integer.parseInt(value);
+                } catch (NumberFormatException e) {
+                    rawValueIdx = getOrAddString(value);
+                    dataType = 0x03; // TYPE_STRING
+                    data = rawValueIdx;
+                }
+            }
+
+            attrs.add(new int[]{nsIdx, nameIdx, rawValueIdx, dataType, data});
+        }
     }
 
     private byte[] encodeStringPool() throws IOException {
         int count = stringPool.size();
-
-        // Encode strings as UTF-16LE
         ByteArrayOutputStream stringData = new ByteArrayOutputStream();
         int[] offsets = new int[count];
         for (int i = 0; i < count; i++) {
@@ -177,43 +299,38 @@ public class BinaryXmlEncoder {
             }
             writeShort(stringData, (short) 0);
         }
-        // Pad string data to 4-byte alignment
         while (stringData.size() % 4 != 0) {
             stringData.write(0);
         }
 
         int headerSize = 28;
-        int offsetsSize = count * 4;
-        int stringsStart = headerSize + offsetsSize;
+        int stringsStart = headerSize + count * 4;
         int totalSize = stringsStart + stringData.size();
 
         ByteArrayOutputStream pool = new ByteArrayOutputStream();
         writeShort(pool, RES_STRING_POOL_TYPE);
         writeShort(pool, (short) headerSize);
         writeInt(pool, totalSize);
-        writeInt(pool, count);        // stringCount
-        writeInt(pool, 0);            // styleCount
-        writeInt(pool, 0);            // flags (0 = UTF-16)
-        writeInt(pool, stringsStart); // stringsStart
-        writeInt(pool, 0);            // stylesStart
+        writeInt(pool, count);
+        writeInt(pool, 0);
+        writeInt(pool, 0); // flags: UTF-16
+        writeInt(pool, stringsStart);
+        writeInt(pool, 0);
 
         for (int offset : offsets) {
             writeInt(pool, offset);
         }
         pool.write(stringData.toByteArray());
-
         return pool.toByteArray();
     }
 
     private byte[] encodeResourceMap() throws IOException {
         ByteArrayOutputStream map = new ByteArrayOutputStream();
-        int totalSize = 8 + resourceIds.size() * 4;
-
+        int totalSize = 8 + mappedAttrIds.size() * 4;
         writeShort(map, RES_XML_RESOURCE_MAP_TYPE);
         writeShort(map, (short) 8);
         writeInt(map, totalSize);
-
-        for (int id : resourceIds) {
+        for (int id : mappedAttrIds) {
             writeInt(map, id);
         }
         return map.toByteArray();
@@ -239,8 +356,8 @@ public class BinaryXmlEncoder {
         writeInt(body, uri);
     }
 
-    private void writeStartElement(int lineNumber, int nsIdx, int nameIdx, int[][] attrs) throws IOException {
-        int attrCount = attrs.length;
+    private void writeStartElement(int lineNumber, int nsIdx, int nameIdx, List<int[]> attrs) throws IOException {
+        int attrCount = attrs.size();
         int chunkSize = 36 + attrCount * 20;
 
         writeShort(body, RES_XML_START_ELEMENT_TYPE);
@@ -248,34 +365,23 @@ public class BinaryXmlEncoder {
         writeInt(body, chunkSize);
         writeInt(body, lineNumber);
         writeInt(body, -1);
-
         writeInt(body, nsIdx);
         writeInt(body, nameIdx);
-        writeShort(body, (short) 0x14);  // attributeStart
-        writeShort(body, (short) 0x14);  // attributeSize
+        writeShort(body, (short) 0x14);
+        writeShort(body, (short) 0x14);
         writeShort(body, (short) attrCount);
-        writeShort(body, (short) 0);     // idIndex
-        writeShort(body, (short) 0);     // classIndex
-        writeShort(body, (short) 0);     // styleIndex
+        writeShort(body, (short) 0);
+        writeShort(body, (short) 0);
+        writeShort(body, (short) 0);
 
         for (int[] attr : attrs) {
-            int aNs = attr[0];
-            int aName = attr[1];
-            int aRawValue = attr[2];
-            int aDataType = attr[3];
-            int aData = attr[4];
-
-            writeInt(body, aNs);
-            writeInt(body, aName);
-            writeInt(body, aRawValue);
+            writeInt(body, attr[0]); // ns
+            writeInt(body, attr[1]); // name
+            writeInt(body, attr[2]); // rawValue
             writeShort(body, (short) 8);
             body.write(0);
-            body.write(aDataType);
-            if (aData == -1 && aDataType == 0x03) {
-                writeInt(body, aRawValue);
-            } else {
-                writeInt(body, aData);
-            }
+            body.write(attr[3]); // dataType
+            writeInt(body, attr[4]); // data
         }
     }
 
@@ -302,21 +408,19 @@ public class BinaryXmlEncoder {
     }
 
     public static void main(String[] args) throws Exception {
-        if (args.length < 4) {
-            System.err.println("Usage: BinaryXmlEncoder <package> <label> <activity> <output> [minSdk] [targetSdk] [versionCode] [versionName]");
+        if (args.length < 2) {
+            System.err.println("Usage: BinaryXmlEncoder <input.xml> <output> [minSdk] [targetSdk] [versionCode] [versionName]");
             System.exit(1);
         }
-        String packageName = args[0];
-        String label = args[1];
-        String activity = args[2];
-        String outputFile = args[3];
-        int minSdk = args.length > 4 ? Integer.parseInt(args[4]) : 21;
-        int targetSdk = args.length > 5 ? Integer.parseInt(args[5]) : 28;
-        int versionCode = args.length > 6 ? Integer.parseInt(args[6]) : 1;
-        String versionName = args.length > 7 ? args[7] : "1.0";
-
+        File inputFile = new File(args[0]);
+        String outputFile = args[1];
         BinaryXmlEncoder encoder = new BinaryXmlEncoder();
-        byte[] data = encoder.encode(packageName, label, activity, minSdk, targetSdk, versionCode, versionName);
+        if (args.length > 2) encoder.minSdk = Integer.parseInt(args[2]);
+        if (args.length > 3) encoder.targetSdk = Integer.parseInt(args[3]);
+        if (args.length > 4) encoder.versionCode = Integer.parseInt(args[4]);
+        if (args.length > 5) encoder.versionName = args[5];
+
+        byte[] data = encoder.encode(inputFile);
 
         try (FileOutputStream fos = new FileOutputStream(outputFile)) {
             fos.write(data);
