@@ -10,3 +10,6 @@
 [submodule "vendor/ARSCLib"]
 	path = vendor/ARSCLib
 	url = https://github.com/REAndroid/ARSCLib.git
+[submodule "vendor/beanshell"]
+	path = vendor/beanshell
+	url = https://github.com/beanshell/beanshell.git

@@ -13,6 +13,9 @@ import java.util.regex.Pattern;
 
 public class NotificationFilterService extends NotificationListenerService {
 
+    private static NotificationFilterService instance;
+    public static NotificationFilterService getInstance() { return instance; }
+
     private static final String TAG = "NotifFilter";
     public static final String PREFS_NAME = "notification_filter";
     public static final String KEY_BLOCKED_PACKAGES = "blocked_packages";
@@ -72,6 +75,13 @@ public class NotificationFilterService extends NotificationListenerService {
 
     @Override
     public void onListenerConnected() {
+        instance = this;
         Log.d(TAG, "Notification listener connected");
+    }
+
+    @Override
+    public void onListenerDisconnected() {
+        instance = null;
+        Log.d(TAG, "Notification listener disconnected");
     }
 }

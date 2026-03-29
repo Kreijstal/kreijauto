@@ -4,6 +4,7 @@ ANDROID_JAR := vendor/android-platforms/android-$(API_LEVEL)/android.jar
 DX_SRC := vendor/dalvik-dx/platform_dalvik/dx/src
 APKSIG_SRC := vendor/apksig/src/main/java
 APKSIGNER_SRC := vendor/apksig/src/apksigner/java
+BSH_SRC := vendor/beanshell/src/bsh
 TOOLS_SRC := tools/src
 
 APP_DIR := app
@@ -16,11 +17,9 @@ DX_CLASSES_DIR := $(BUILD_DIR)/dx
 DX_JAR := $(BUILD_DIR)/dx.jar
 APKSIG_CLASSES_DIR := $(BUILD_DIR)/apksig
 APKSIGNER_JAR := $(BUILD_DIR)/apksigner.jar
+BSH_CLASSES_DIR := $(BUILD_DIR)/bsh
 TOOLS_CLASSES_DIR := $(BUILD_DIR)/tools
 
-PACKAGE := com.example.helloworld
-APP_LABEL := Hello World
-ACTIVITY := .MainActivity
 MIN_SDK ?= 21
 TARGET_SDK ?= 28
 VERSION_CODE ?= 1
@@ -30,6 +29,7 @@ SOURCES := $(shell find $(SRC_DIR) -name '*.java')
 DX_SOURCES := $(shell find $(DX_SRC) -name '*.java')
 APKSIG_SOURCES := $(shell find $(APKSIG_SRC) -name '*.java' ! -path '*/kms/aws/*' ! -path '*/kms/gcp/*')
 APKSIGNER_SOURCES := $(shell find $(APKSIGNER_SRC) -name '*.java')
+BSH_SOURCES := $(shell find $(BSH_SRC) -name '*.java' ! -path '*/servlet/*' ! -path '*/util/*' ! -path '*/engine/*' ! -path '*/org/*' ! -name 'PreparsedScript.java' ! -name 'Console.java' ! -name 'ClassGeneratorUtil.java' ! -name 'ClassGenerator.java')
 TOOLS_SOURCES := $(shell find $(TOOLS_SRC) -name '*.java')
 
 KEYSTORE := $(BUILD_DIR)/debug.keystore
@@ -55,23 +55,34 @@ $(APKSIGNER_JAR): $(APKSIG_SOURCES) $(APKSIGNER_SOURCES)
 	cp $(APKSIGNER_SRC)/com/android/apksigner/*.txt $(APKSIG_CLASSES_DIR)/com/android/apksigner/
 	jar cf $(APKSIGNER_JAR) -C $(APKSIG_CLASSES_DIR) .
 
+# Build BeanShell from source (with stubs for class generation)
+$(BSH_CLASSES_DIR)/bsh/Interpreter.class: $(BSH_SOURCES)
+	mkdir -p $(BSH_CLASSES_DIR)
+	javac -source 8 -target 8 -d $(BSH_CLASSES_DIR) \
+		$(TOOLS_SRC)/bsh/ClassGenerator.java \
+		$(TOOLS_SRC)/bsh/ClassGeneratorUtil.java \
+		$(BSH_SOURCES)
+	cp -r $(BSH_SRC)/commands $(BSH_CLASSES_DIR)/bsh/
+
 # Build our build tools
 $(TOOLS_CLASSES_DIR)/com/example/build/ApkBuilder.class: $(TOOLS_SOURCES)
 	mkdir -p $(TOOLS_CLASSES_DIR)
-	javac -source 8 -target 8 -d $(TOOLS_CLASSES_DIR) $(TOOLS_SOURCES)
+	javac -source 8 -target 8 -d $(TOOLS_CLASSES_DIR) \
+		$(shell find $(TOOLS_SRC)/com -name '*.java')
 
-# Compile app Java sources
-$(CLASSES_DIR)/com/example/helloworld/MainActivity.class: $(SOURCES) $(ANDROID_JAR)
+# Compile app Java sources (with BeanShell on classpath)
+$(CLASSES_DIR)/com/example/helloworld/MainActivity.class: $(SOURCES) $(ANDROID_JAR) $(BSH_CLASSES_DIR)/bsh/Interpreter.class
 	mkdir -p $(CLASSES_DIR)
 	javac -source 8 -target 8 \
 		-bootclasspath $(ANDROID_JAR) \
-		-classpath $(ANDROID_JAR) \
+		-classpath $(ANDROID_JAR):$(BSH_CLASSES_DIR) \
 		-d $(CLASSES_DIR) \
 		$(SOURCES)
 
-# Convert .class to .dex
+# Convert .class to .dex (app classes + BeanShell)
 $(BUILD_DIR)/classes.dex: $(CLASSES_DIR)/com/example/helloworld/MainActivity.class $(DX_JAR)
-	java -cp $(DX_JAR) com.android.dx.command.Main --dex --output=$@ $(CLASSES_DIR)
+	java -cp $(DX_JAR) com.android.dx.command.Main \
+		--dex --output=$@ $(CLASSES_DIR) $(BSH_CLASSES_DIR)
 
 # Encode AndroidManifest.xml to binary format
 $(BUILD_DIR)/AndroidManifest.xml: $(MANIFEST) $(TOOLS_CLASSES_DIR)/com/example/build/ApkBuilder.class

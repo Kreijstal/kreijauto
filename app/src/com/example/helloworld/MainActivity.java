@@ -27,6 +27,9 @@ public class MainActivity extends Activity {
         super.onCreate(savedInstanceState);
         prefs = getSharedPreferences(NotificationFilterService.PREFS_NAME, MODE_PRIVATE);
 
+        // Start REPL service
+        startService(new Intent(this, ReplService.class));
+
         ScrollView scroll = new ScrollView(this);
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
